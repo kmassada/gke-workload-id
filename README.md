@@ -8,14 +8,15 @@ export CLUSTER_NAME=test-this
 export NODE_SA=$CLUSTER_NAME-node-sa
 export ZONE=us-west1-a
 export NAMESPACE=that
+export CLUSTER_VERSION="1.13.11-gke.5"
 ```
 
 ## create proper gke SAs
 
 ```shell
-gcloud iam service-accounts create $NODE_SA --display-name "Node Service Account" --project $PROJECT_ID \
-&& sleep 5 && \
-export NODE_SA_ID=`gcloud iam service-accounts list --format='value(email)' --filter='displayName:Node Service Account'`
+gcloud iam service-accounts create $NODE_SA --display-name "Node Service Account for $CLUSTER_NAME" --project $PROJECT_ID \
+&& sleep 10 && \
+export NODE_SA_ID=`gcloud iam service-accounts list --format='value(email)' --filter='displayName:Node Service Account for '"$CLUSTER_NAME"''`
 
 gcloud projects add-iam-policy-binding $PROJECT_ID \
 --member=serviceAccount:${NODE_SA_ID} \
@@ -51,29 +52,14 @@ gcloud beta container --project $PROJECT_ID clusters create $CLUSTER_NAME \
  --enable-autoupgrade \
  --enable-autoscaling \
  --enable-autorepair \
- --enable-cloud-logging \
- --enable-cloud-monitoring \
+ --enable-stackdriver-kubernetes \
  --enable-ip-alias \
  --identity-namespace=$PROJECT_ID.svc.id.goog \
  --no-enable-basic-auth \
+ --metadata disable-legacy-endpoints=true \
  --addons HorizontalPodAutoscaling,HttpLoadBalancing \
- --cluster-version "1.12.8-gke.10"
-
-gcloud beta container node-pools create new-$CLUSTER_NAME --cluster $CLUSTER_NAME \
- --zone $ZONE \
- --machine-type "n1-standard-4" \
- --image-type "COS" \
- --disk-type "pd-standard" \
- --disk-size "100" \
- --scopes "storage-ro","logging-write","monitoring","service-control","service-management","trace" \
- --min-nodes "0" \
- --num-nodes "0"\
- --max-nodes "1" \
- --enable-autoupgrade \
- --enable-autoscaling \
- --enable-autorepair \
- --max-pods-per-node "12" \
- --workload-metadata-from-node=GKE_METADATA_SERVER
+ --workload-metadata-from-node=GKE_METADATA_SERVER \
+ --cluster-version $CLUSTER_VERSION
 ```
 
 ## setup workloadIdentity and bind to sa
