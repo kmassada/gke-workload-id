@@ -81,7 +81,49 @@ kubectl annotate serviceaccount $NAMESPACE-sa \
    iam.gke.io/gcp-service-account=$NODE_SA_ID
 ```
 
-## prep gcs
+## test workload
+
+Test workload with 2 prominent methods, either run adhoc pod or create a workload that goes on a node-pool
+
+### adhoc pod
+
+create adhoc pod
+
+```shell
+kubectl run -it \
+  --generator=run-pod/v1 \
+  --image google/cloud-sdk \
+  --serviceaccount $NAMESPACE-sa \
+  --namespace $NAMESPACE-ns \
+  workload-identity-test
+```
+### nodepool and dedicated workload
+
+first create a nodepool
+
+#### create 
+
+```shell
+gcloud beta container node-pools create new-$CLUSTER_NAME --cluster $CLUSTER_NAME \
+ --zone $ZONE \
+ --machine-type "n1-standard-4" \
+ --image-type "COS" \
+ --disk-type "pd-standard" \
+ --disk-size "100" \
+ --scopes "storage-ro","logging-write","monitoring","service-control","service-management","trace" \
+ --min-nodes "0" \
+ --num-nodes "0"\
+ --max-nodes "1" \
+ --enable-autoupgrade \
+ --enable-autoscaling \
+ --enable-autorepair \
+ --max-pods-per-node "12" \
+ --workload-metadata-from-node=GKE_METADATA_SERVER
+```
+
+#### prep gcs
+
+prep a bucket that pod will read or write from
 
 ```shell
 gsutil mb gs://$PROJECT_ID/
@@ -90,7 +132,9 @@ echo 'stuff' > test.txt
 gsutil cp test.txt gs://$PROJECT_ID/
 ```
 
-## create workload and test
+#### create workload and test
+
+pin workload to nodepool
 
 ```shell
 cat << EOF | kubectl apply --namespace $NAMESPACE-ns -f -
@@ -100,7 +144,7 @@ metadata:
   creationTimestamp: null
   labels:
     run: cloud-sdk
-  name: cloud-sdk
+  name: cloud-sdk 
 spec:
   replicas: 1
   selector:
@@ -136,7 +180,7 @@ kubectl --namespace $NAMESPACE-ns exec -it $POD_NAME -c cloud-sdk -- /bin/bash
 ```
 
 ```shell
-curl "http://metadata.google.internal/computeMetadata/v1/instance/disks/0/" -H "Metadata-Flavor: Google"
+curl "http://metadata.google.internal/computeMetadata/v1/instance/id" -H "Metadata-Flavor: Google"
 ```
 
 ## CLEANUP
