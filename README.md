@@ -4,11 +4,13 @@
 
 ```shell
 export PROJECT_ID=`gcloud config get-value project`
-export CLUSTER_NAME=test-this
+export CLUSTER_NAME=albatros
 export NODE_SA=$CLUSTER_NAME-node-sa
+export WID_SA=$CLUSTER_NAME-wid-sa
 export ZONE=us-west1-a
-export NAMESPACE=that
-export CLUSTER_VERSION="1.13.11-gke.5"
+export NAMESPACE=workload-ns
+export SERVICEACCOUNT=workload-sa
+export CLUSTER_VERSION=`gcloud container get-server-config --zone $ZONE --format="value(validMasterVersions[0])"`
 ```
 
 ## create proper gke SAs
@@ -35,6 +37,14 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 --role=roles/logging.logWriter
 ```
 
+## create workload id sa
+
+```shell
+gcloud iam service-accounts create $WID_SA --display-name "Workload Identity Account for $CLUSTER_NAME" --project $PROJECT_ID \
+&& sleep 10 && \
+export WID_SA_ID=`gcloud iam service-accounts list --format='value(email)' --filter='displayName:Workload Identity Account for '"$CLUSTER_NAME"''`
+```
+
 ## create cluster then resize to 0
 
 ```shell
@@ -48,17 +58,18 @@ gcloud beta container --project $PROJECT_ID clusters create $CLUSTER_NAME \
  --min-nodes "0" \
  --num-nodes "1"\
  --max-nodes "2" \
- --default-max-pods-per-node "12" \
+ --max-surge-upgrade 1 \
+ --max-unavailable-upgrade 0 \
+ --default-max-pods-per-node "60" \
  --enable-autoupgrade \
  --enable-autoscaling \
  --enable-autorepair \
  --enable-stackdriver-kubernetes \
  --enable-ip-alias \
- --identity-namespace=$PROJECT_ID.svc.id.goog \
+ --workload-pool=$PROJECT_ID.svc.id.goog \
  --no-enable-basic-auth \
  --metadata disable-legacy-endpoints=true \
- --addons HorizontalPodAutoscaling,HttpLoadBalancing \
- --workload-metadata-from-node=GKE_METADATA_SERVER \
+ --addons HorizontalPodAutoscaling,HttpLoadBalancing,ConfigConnector \
  --cluster-version $CLUSTER_VERSION
 ```
 
@@ -67,18 +78,18 @@ gcloud beta container --project $PROJECT_ID clusters create $CLUSTER_NAME \
 ```shell
 gcloud container clusters get-credentials $CLUSTER_NAME --zone $ZONE --project $PROJECT_ID
 
-kubectl create namespace $NAMESPACE-ns
-kubectl create serviceaccount $NAMESPACE-sa \
- --namespace $NAMESPACE-ns
+kubectl create namespace $NAMESPACE
+kubectl create serviceaccount $SERVICEACCOUNT \
+ --namespace $NAMESPACE
 
 gcloud iam service-accounts add-iam-policy-binding \
   --role roles/iam.workloadIdentityUser \
-  --member "serviceAccount:$PROJECT_ID.svc.id.goog[$NAMESPACE-ns/$NAMESPACE-sa]" \
-  $NODE_SA_ID
+  --member "serviceAccount:$PROJECT_ID.svc.id.goog[$NAMESPACE/$SERVICEACCOUNT]" \
+  $WID_SA_ID
 
-kubectl annotate serviceaccount $NAMESPACE-sa \
-   --namespace $NAMESPACE-ns \
-   iam.gke.io/gcp-service-account=$NODE_SA_ID
+kubectl annotate serviceaccount $SERVICEACCOUNT \
+   --namespace $NAMESPACE \
+   iam.gke.io/gcp-service-account=$WID_SA_ID
 ```
 
 ## test workload
@@ -93,10 +104,23 @@ create adhoc pod
 kubectl run -it \
   --generator=run-pod/v1 \
   --image google/cloud-sdk \
-  --serviceaccount $NAMESPACE-sa \
-  --namespace $NAMESPACE-ns \
+  --serviceaccount $SERVICEACCOUNT \
+  --namespace $NAMESPACE \
   workload-identity-test
 ```
+
+verify by curling metadata
+
+```shell
+curl -H 'Metadata-Flavor:Google' http://169.254.169.254/computeMetadata/v1/instance/id --keepalive-time 60
+```
+
+or verify by listing scopes
+
+```shell
+gcloud auth list
+```
+
 ### nodepool and dedicated workload
 
 first create a nodepool
@@ -137,7 +161,7 @@ gsutil cp test.txt gs://$PROJECT_ID/
 pin workload to nodepool
 
 ```shell
-cat << EOF | kubectl apply --namespace $NAMESPACE-ns -f -
+cat << EOF | kubectl apply --namespace $NAMESPACE -f -
 apiVersion: apps/v1beta1
 kind: Deployment
 metadata:
@@ -175,8 +199,8 @@ spec:
         resources: {}
 EOF
 
-POD_NAME=`kubectl get pods -l run=cloud-sdk  --namespace $NAMESPACE-ns -o jsonpath='{.items[0].metadata.name}'`
-kubectl --namespace $NAMESPACE-ns exec -it $POD_NAME -c cloud-sdk -- /bin/bash
+POD_NAME=`kubectl get pods -l run=cloud-sdk  --namespace $NAMESPACE -o jsonpath='{.items[0].metadata.name}'`
+kubectl --namespace $NAMESPACE exec -it $POD_NAME -c cloud-sdk -- /bin/bash
 ```
 
 ```shell
@@ -191,7 +215,10 @@ gcloud container clusters resize $CLUSTER_NAME \
 --zone $ZONE \
 --num-nodes "0"
 
-kubectl delete deploy/cloud-sdk --namespace $NAMESPACE-ns
+kubectl scale deploy/cloud-sdk --replicas=0 --namespace $NAMESPACE
+
+
+kubectl delete deploy/cloud-sdk --namespace $NAMESPACE
 gcloud container clusters delete $CLUSTER_NAME --zone $ZONE
 gcloud iam service-accounts delete $NODE_SA_ID
 ```
